@@ -8,7 +8,7 @@ from openai import AsyncOpenAI
 
 from pydantic_ai import ModelProfile
 from pydantic_ai.exceptions import UserError
-from pydantic_ai.models import cached_async_http_client
+from pydantic_ai.models import create_async_http_client
 from pydantic_ai.profiles.openai import OpenAIJsonSchemaTransformer, OpenAIModelProfile
 from pydantic_ai.providers import Provider
 
@@ -28,11 +28,13 @@ class ZaiProvider(Provider[AsyncOpenAI]):
     def client(self) -> AsyncOpenAI:
         return self._client
 
-    def model_profile(self, model_name: str) -> ModelProfile | None:
+    @staticmethod
+    def model_profile(model_name: str) -> ModelProfile | None:
         profile = zai_model_profile(model_name)
 
         return OpenAIModelProfile(
             json_schema_transformer=OpenAIJsonSchemaTransformer,
+            supports_json_object_output=True,
             openai_chat_thinking_field='reasoning_content',
             openai_chat_send_back_thinking_parts='field',
         ).update(profile)
@@ -71,5 +73,5 @@ class ZaiProvider(Provider[AsyncOpenAI]):
         elif http_client is not None:
             self._client = AsyncOpenAI(base_url=self.base_url, api_key=api_key, http_client=http_client)
         else:
-            http_client = cached_async_http_client(provider='zai')
+            http_client = create_async_http_client()
             self._client = AsyncOpenAI(base_url=self.base_url, api_key=api_key, http_client=http_client)

@@ -23,8 +23,7 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "pydantic-ai-slim>=0.0.39",
-    "openai>=2.11.0",
+    "pydantic-ai-slim[openai]>=1.105.0",
 ]
 
 [project.urls]

@@ -7,6 +7,7 @@ import pytest
 from openai import AsyncOpenAI
 
 from pydantic_ai.exceptions import UserError
+from pydantic_ai.profiles import ModelProfile
 from pydantic_ai.profiles.openai import OpenAIJsonSchemaTransformer, OpenAIModelProfile
 from pydantic_ai_zai import ZaiModel
 from pydantic_ai_zai.profile import zai_model_profile
@@ -69,10 +70,33 @@ def test_zai_model_default_provider(monkeypatch: pytest.MonkeyPatch):
     assert model.model_name == 'glm-4.7'
 
 
-def test_zai_profile_thinking_models():
-    assert zai_model_profile('glm-4.7') is not None
-    assert zai_model_profile('glm-4.6') is not None
-    assert zai_model_profile('glm-4.6v') is not None
-    assert zai_model_profile('GLM-4.7') is not None
-    assert zai_model_profile('glm-4.5-air') is None
-    assert zai_model_profile('glm-4.5-air-250723') is None
+def test_zai_provider_model_profile_glm_5_2():
+    provider = ZaiProvider(openai_client=AsyncOpenAI(api_key='api-key'))
+
+    profile = provider.model_profile('glm-5.2')
+    assert profile is not None
+    assert isinstance(profile, OpenAIModelProfile)
+    assert profile.json_schema_transformer == OpenAIJsonSchemaTransformer
+    assert profile.openai_chat_thinking_field == 'reasoning_content'
+    assert profile.openai_chat_send_back_thinking_parts == 'field'
+    assert profile.supports_thinking is True
+    assert profile.supports_json_object_output is True
+
+
+def test_zai_profile_supports_thinking_gating():
+    assert zai_model_profile('glm-5.2') == ModelProfile(supports_thinking=True)
+    assert zai_model_profile('glm-5') == ModelProfile(supports_thinking=True)
+    assert zai_model_profile('glm-4.7') == ModelProfile(supports_thinking=True)
+    assert zai_model_profile('glm-4.6') == ModelProfile(supports_thinking=True)
+    assert zai_model_profile('glm-4.6v') is None
+    assert zai_model_profile('glm-4.5v') is None
+    assert zai_model_profile('glm-4-32b-0414-128k') is None
+
+
+def test_zai_provider_profile_vision_model_excludes_thinking():
+    provider = ZaiProvider(openai_client=AsyncOpenAI(api_key='api-key'))
+
+    profile = provider.model_profile('glm-4.6v')
+    assert profile is not None
+    assert profile.supports_thinking is False
+    assert profile.openai_chat_thinking_field == 'reasoning_content'

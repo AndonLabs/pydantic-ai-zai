@@ -1,14 +1,23 @@
 from __future__ import annotations as _annotations
 
 from pydantic_ai.profiles import ModelProfile
-from pydantic_ai.profiles.openai import OpenAIModelProfile
 
 
 def zai_model_profile(model_name: str) -> ModelProfile | None:
+    """The model profile for Z.AI (Zhipu AI) GLM models.
+
+    Marks thinking-capable models (`glm-5`, `glm-4.7`, `glm-4.6`, `glm-4.5`)
+    via `supports_thinking=True`. Vision models (`glm-4.6v`, `glm-4.5v`) are
+    excluded as they are not documented as supporting thinking mode.
+
+    Provider-specific request/response shape (e.g. the `reasoning_content` field
+    used by Z.AI's API) is configured in `ZaiProvider.model_profile()`.
+    """
     model_lower = model_name.lower()
-    if 'glm-4.7' in model_lower or 'glm-4.6' in model_lower:
-        return OpenAIModelProfile(
-            openai_chat_thinking_field='reasoning_content',
-            openai_chat_send_back_thinking_parts='field',
-        )
+    thinking_prefixes = ('glm-5', 'glm-4.7', 'glm-4.6', 'glm-4.5')
+    vision_prefixes = ('glm-4.6v', 'glm-4.5v')
+    if model_lower.startswith(vision_prefixes):
+        return None
+    if model_lower.startswith(thinking_prefixes):
+        return ModelProfile(supports_thinking=True)
     return None

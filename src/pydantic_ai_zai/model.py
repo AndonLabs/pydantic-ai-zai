@@ -1,20 +1,21 @@
 from __future__ import annotations as _annotations
 
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from typing_extensions import override
 
 from pydantic_ai.models import ModelRequestParameters
-from pydantic_ai.models.openai import OpenAIChatModel, OpenAIChatModelSettings
 from pydantic_ai.profiles import ModelProfileSpec
 from pydantic_ai.providers import Provider
-from pydantic_ai.settings import ModelSettings
+from pydantic_ai.settings import ModelSettings, ThinkingLevel
 
 from .provider import ZaiProvider
 
 try:
-    from openai import AsyncOpenAI
+    from openai import AsyncOpenAI, Omit, omit
+
+    from pydantic_ai.models.openai import OpenAIChatModel, OpenAIChatModelSettings
 except ImportError as _import_error:
     raise ImportError(
         'Please install the `openai` package to use the Z.AI model, '
@@ -23,18 +24,58 @@ except ImportError as _import_error:
 
 __all__ = ('ZaiModel', 'ZaiModelName', 'ZaiModelSettings')
 
-LatestZaiModelNames = str
+LatestZaiModelNames = Literal[
+    'glm-5.2',
+    'glm-5.1',
+    'glm-5',
+    'glm-4.7',
+    'glm-4.7-flash',
+    'glm-4.7-flashx',
+    'glm-4.6',
+    'glm-4.6v',
+    'glm-4.6v-flash',
+    'glm-4.6v-flashx',
+    'glm-4.5',
+    'glm-4.5v',
+    'glm-4.5-air',
+    'glm-4.5-airx',
+    'glm-4.5-x',
+    'glm-4.5-flash',
+    'glm-4-32b-0414-128k',
+    'autoglm-phone-multilingual',
+]
 
-ZaiModelName = str
+ZaiModelName = str | LatestZaiModelNames
+"""Possible Z.AI model names.
+
+Since Z.AI supports a variety of models and the list changes frequently, we explicitly list known models
+but allow any name in the type hints.
+
+See <https://docs.z.ai/> for an up to date list of models.
+"""
 
 
 class ZaiModelSettings(ModelSettings, total=False):
-    zai_thinking: bool
+    """Settings used for a Z.AI model request.
+
+    ALL FIELDS MUST BE `zai_` PREFIXED SO YOU CAN MERGE THEM WITH OTHER MODELS.
+    """
+
     zai_clear_thinking: bool
+    """Whether to clear historical thinking content from prior turns.
+
+    Set to `False` for preserved thinking, which retains reasoning content from prior
+    assistant responses for improved multi-turn coherence. Defaults to `True` (clear) when not set.
+
+    Only affects cross-turn historical thinking blocks; it does not change whether the model
+    generates thinking in the current turn (controlled by the unified `thinking` setting).
+    """
 
 
 @dataclass(init=False)
 class ZaiModel(OpenAIChatModel):
+    """A model that uses Z.AI's OpenAI-compatible API."""
+
     def __init__(
         self,
         model_name: ZaiModelName,
@@ -54,26 +95,88 @@ class ZaiModel(OpenAIChatModel):
         model_request_parameters: ModelRequestParameters,
     ) -> tuple[ModelSettings | None, ModelRequestParameters]:
         merged_settings, customized_parameters = super().prepare_request(model_settings, model_request_parameters)
-        new_settings = _zai_settings_to_openai_settings(cast(ZaiModelSettings, merged_settings or {}))
+        new_settings = _zai_settings_to_openai_settings(
+            cast(ZaiModelSettings, merged_settings or {}), customized_parameters, self.model_name
+        )
         return new_settings, customized_parameters
 
+    @override
+    def _translate_thinking(
+        self,
+        model_settings: OpenAIChatModelSettings,
+        model_request_parameters: ModelRequestParameters,
+    ) -> Omit:
+        # Z.AI uses `extra_body.thinking.type`, not the OpenAI `reasoning_effort` parameter,
+        # which `prepare_request` translates the unified `thinking` setting into.
+        del model_settings, model_request_parameters
+        return omit
 
-def _zai_settings_to_openai_settings(model_settings: ZaiModelSettings) -> OpenAIChatModelSettings:
+
+def _zai_settings_to_openai_settings(
+    model_settings: ZaiModelSettings,
+    model_request_parameters: ModelRequestParameters,
+    model_name: str,
+) -> OpenAIChatModelSettings:
+    """Transforms a 'ZaiModelSettings' object into an 'OpenAIChatModelSettings' object.
+
+    Maps the unified `thinking` setting and Z.AI-specific `zai_clear_thinking` into the
+    `extra_body.thinking` payload expected by the Z.AI API's OpenAI-compatible endpoint. On
+    GLM-5.2+ models an explicit effort level is additionally forwarded as `extra_body.reasoning_effort`.
+
+    Args:
+        model_settings: The 'ZaiModelSettings' object to transform.
+        model_request_parameters: The request parameters carrying the resolved unified `thinking` value.
+        model_name: The target model name, used to gate the GLM-5.2+ `reasoning_effort` parameter.
+
+    Returns:
+        An 'OpenAIChatModelSettings' object with equivalent settings.
+    """
     extra_body = dict(cast(dict[str, Any], model_settings.get('extra_body', {})))
 
-    thinking_enabled = model_settings.get('zai_thinking')
-    clear_thinking = model_settings.get('zai_clear_thinking')
+    thinking_payload: dict[str, Any] = {}
+    thinking_level = model_request_parameters.thinking
+    if thinking_level is False:
+        thinking_payload['type'] = 'disabled'
+    elif thinking_level is not None:
+        # `True` and any effort level (`'minimal'`/`'low'`/`'medium'`/`'high'`/`'xhigh'`)
+        # enable thinking. Effort granularity is forwarded separately via `reasoning_effort`
+        # on models that support it.
+        thinking_payload['type'] = 'enabled'
 
-    if thinking_enabled is not None:
-        thinking: dict[str, Any] = {
-            'type': 'enabled' if thinking_enabled else 'disabled',
-        }
-        if clear_thinking is not None:
-            thinking['clear_thinking'] = clear_thinking
-        extra_body['thinking'] = thinking
+    clear_thinking = model_settings.get('zai_clear_thinking')
+    if clear_thinking is not None:
+        thinking_payload['clear_thinking'] = clear_thinking
+
+    if thinking_payload:
+        extra_body['thinking'] = thinking_payload
+
+    reasoning_effort = _zai_reasoning_effort(thinking_level, model_name)
+    if reasoning_effort is not None:
+        extra_body['reasoning_effort'] = reasoning_effort
 
     filtered = {k: v for k, v in model_settings.items() if not k.startswith('zai_')}
     if extra_body:
         filtered['extra_body'] = extra_body
 
-    return OpenAIChatModelSettings(**filtered)  # type: ignore[reportCallIssue]
+    return cast(OpenAIChatModelSettings, filtered)
+
+
+_REASONING_EFFORT_MODEL_PREFIXES = ('glm-5.2',)
+"""Model name prefixes supporting the GLM-5.2+ `reasoning_effort` parameter.
+
+Earlier GLM models only support thinking on/off, so effort levels collapse to enabled there.
+"""
+
+
+def _zai_reasoning_effort(thinking_level: ThinkingLevel | None, model_name: str) -> str | None:
+    """Maps the unified `thinking` effort level to Z.AI's `reasoning_effort`, for models that support it.
+
+    Returns `None` (no `reasoning_effort` sent) unless `thinking` carries an explicit effort level
+    (`'minimal'`/`'low'`/`'medium'`/`'high'`/`'xhigh'`) and the model is GLM-5.2 or newer. A plain
+    `thinking=True` leaves `reasoning_effort` unset so Z.AI applies its own default.
+    """
+    if not isinstance(thinking_level, str):
+        return None
+    if not model_name.lower().startswith(_REASONING_EFFORT_MODEL_PREFIXES):
+        return None
+    return thinking_level
